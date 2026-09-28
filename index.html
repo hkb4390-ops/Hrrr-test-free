@@ -1134,17 +1134,35 @@
   font-size:14px;font-weight:900;cursor:pointer;
 }
 .key-unlock-btn{background:linear-gradient(135deg,#6366f1,#8b5cf6);color:#fff}
-.key-whatsapp-btn{background:#25d366;color:#071b0d}
+.key-whatsapp-btn{
+  background:linear-gradient(135deg,#25d366,#16a34a);color:#04130a;
+  min-height:50px; box-shadow:0 8px 24px rgba(34,197,94,.22);
+}
 .free-key-btn{
-    width:100%; margin-top:10px; padding:13px; border-radius:12px;
-    border:1px solid rgba(34,211,238,.35);
-    background:linear-gradient(135deg,rgba(6,182,212,.18),rgba(99,102,241,.18));
-    color:#e0f2fe; font-weight:900; cursor:pointer;
-    box-shadow:0 8px 25px rgba(6,182,212,.10);
+    width:100%; margin-top:12px; min-height:54px; padding:14px 16px; border-radius:15px;
+    border:1px solid rgba(34,211,238,.55);
+    background:linear-gradient(135deg,#06b6d4,#6366f1,#8b5cf6);
+    background-size:200% 200%;
+    color:#fff; font-weight:900; cursor:pointer; font-size:14px; letter-spacing:.2px;
+    box-shadow:0 10px 30px rgba(6,182,212,.25), 0 0 0 1px rgba(255,255,255,.06) inset;
+    animation:freeKeyGlow 2.4s ease-in-out infinite, gradientMove 4s ease infinite;
+    transition:transform .18s ease, opacity .18s ease, filter .18s ease;
+}
+.free-key-btn:active{transform:scale(.97)}
+.free-key-btn:disabled{cursor:not-allowed;opacity:.82;animation:none;filter:saturate(.8)}
+.free-key-btn.free-key-active{
+    background:linear-gradient(135deg,#059669,#10b981);
+    border-color:rgba(110,231,183,.55);
+    box-shadow:0 10px 30px rgba(16,185,129,.18);
+}
+@keyframes freeKeyGlow{
+    0%,100%{box-shadow:0 10px 30px rgba(6,182,212,.20),0 0 0 1px rgba(255,255,255,.06) inset}
+    50%{box-shadow:0 12px 38px rgba(99,102,241,.38),0 0 22px rgba(6,182,212,.16)}
 }
 .free-key-note{margin-top:8px;text-align:center;font-size:10px;color:#94a3b8;line-height:1.5}
 .key-or{text-align:center;margin:13px 0 2px;color:rgba(255,255,255,.4);font-size:11px;font-weight:800}
 .key-help-text{text-align:center;color:rgba(255,255,255,.5);font-size:11px;line-height:1.5;margin-top:12px}
+.admin-key-link-note{text-align:center;color:rgba(255,255,255,.42);font-size:10px;margin-top:6px}
 </style>
 <style>
 @keyframes tgPopupIn{0%{opacity:0;transform:translateY(28px) scale(.94);filter:blur(8px)}70%{opacity:1;transform:translateY(-3px) scale(1.01);filter:blur(0)}100%{opacity:1;transform:translateY(0) scale(1)}}
@@ -2032,12 +2050,109 @@ function clearFreeAccessLocal() {
 
 function hasActiveFreeAccess() {
     const access = getFreeAccessLocal();
-    return !!(
+
+    if (!access || !access.key) {
+        return false;
+    }
+
+    const expiresAt = Number(access.expiresAt || 0);
+    const sameDevice =
+        String(access.deviceId || '') === String(getDeviceId());
+
+    // Auto-remove expired free access from this browser/device.
+    if (!expiresAt || expiresAt <= Date.now() || !sameDevice) {
+        clearFreeAccessLocal();
+        return false;
+    }
+
+    return true;
+}
+
+let freeAccessExpiryTimer = null;
+let freeAccessUiTimer = null;
+
+function formatFreeAccessRemaining(ms) {
+    const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+
+    if (hours > 0) {
+        return `${hours}h ${String(minutes).padStart(2, '0')}m`;
+    }
+
+    return `${minutes}m ${String(seconds).padStart(2, '0')}s`;
+}
+
+function updateFreeKeyButtonUI() {
+    const btn = document.querySelector('.free-key-btn');
+    const note = document.querySelector('.free-key-note');
+    if (!btn) return;
+
+    const access = getFreeAccessLocal();
+    const expiresAt = Number(access?.expiresAt || 0);
+    const sameDevice =
         access &&
-        access.key &&
-        Number(access.expiresAt || 0) > Date.now() &&
-        String(access.deviceId || '') === String(getDeviceId())
-    );
+        String(access.deviceId || '') === String(getDeviceId());
+
+    if (expiresAt > Date.now() && sameDevice) {
+        const remaining = expiresAt - Date.now();
+        btn.disabled = true;
+        btn.classList.add('free-key-active');
+        btn.innerHTML = `🔓 Free Access Active • ${formatFreeAccessRemaining(remaining)}`;
+        if (note) {
+            note.innerText = 'Free Access active है। समय पूरा होते ही access अपने-आप lock हो जाएगा।';
+        }
+        return;
+    }
+
+    btn.disabled = false;
+    btn.classList.remove('free-key-active');
+    btn.innerHTML = '🎁 Get Free Key • 1 Hour';
+    if (note) {
+        note.innerText = 'Free Key एक बार redeem होगी और इसी device पर 1 घंटे चलेगी।';
+    }
+}
+
+function scheduleFreeAccessExpiry() {
+    if (freeAccessExpiryTimer) clearTimeout(freeAccessExpiryTimer);
+    if (freeAccessUiTimer) clearInterval(freeAccessUiTimer);
+
+    const access = getFreeAccessLocal();
+    const expiresAt = Number(access?.expiresAt || 0);
+
+    updateFreeKeyButtonUI();
+
+    if (!expiresAt) return;
+
+    freeAccessUiTimer = setInterval(() => {
+        updateFreeKeyButtonUI();
+    }, 1000);
+
+    const delay = Math.max(0, expiresAt - Date.now());
+    freeAccessExpiryTimer = setTimeout(async () => {
+        clearFreeAccessLocal();
+        if (freeAccessUiTimer) {
+            clearInterval(freeAccessUiTimer);
+            freeAccessUiTimer = null;
+        }
+        freeAccessExpiryTimer = null;
+
+        updateFreeKeyButtonUI();
+
+        // Re-render the test list so every test becomes locked immediately.
+        try {
+            if (typeof renderTestCards === 'function') {
+                await renderTestCards();
+            } else if (typeof loadTestSelection === 'function') {
+                await loadTestSelection();
+            } else if (typeof renderTests === 'function') {
+                await renderTests();
+            }
+        } catch (e) {
+            console.warn('Free access expiry UI refresh failed:', e);
+        }
+    }, delay + 50);
 }
 
 function isTestUnlocked(testId) {
@@ -2061,6 +2176,7 @@ function setKeyStatus(message, type) {
 
 function openKeyModal(testId, testName) {
     pendingLockedTest = { id: testId, name: testName };
+    updateFreeKeyButtonUI();
     document.getElementById('key-test-name').innerText = testName || 'Premium Test';
     document.getElementById('unlock-key-input').value = '';
     document.getElementById('key-status-box').className = 'key-status';
@@ -2074,11 +2190,10 @@ function closeKeyModal(event) {
     pendingLockedTest = null;
 }
 
+const ADMIN_KEY_URL = 'https://get-test-key.vercel.app/';
+
 function contactAdminWhatsApp() {
-    const msg = encodeURIComponent(
-        `Hello Admin,\n\nमैं ${APP_NAME} में key लेना चाहता हूँ।\nTest: ${pendingLockedTest?.name || 'Test Series'}\nPrice: ₹${KEY_PRICE}\nStudent Name: ${currentUser?.name || 'Student'}`
-    );
-    window.open(`https://wa.me/${ADMIN_WHATSAPP}?text=${msg}`, '_blank');
+    window.open(ADMIN_KEY_URL, '_blank', 'noopener,noreferrer');
 }
 
 
@@ -2122,7 +2237,19 @@ async function fetchFreeKeyApi(path, options = {}) {
 }
 
 async function startFreeKeyFlow() {
+    if (hasActiveFreeAccess()) {
+        updateFreeKeyButtonUI();
+        setKeyStatus('🔓 Free Access अभी active है। Expiry के बाद फिर से key generate कर सकते हैं।', 'success');
+        return;
+    }
+
     setKeyStatus('Free Key तैयार हो रही है…', 'success');
+
+    const btn = document.querySelector('.free-key-btn');
+    if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '⏳ Creating Free Key…';
+    }
 
     try {
         const deviceId = getFreeKeyDeviceId();
@@ -2150,6 +2277,8 @@ async function startFreeKeyFlow() {
     } catch (error) {
         console.error('Free key start error:', error);
         setKeyStatus(`❌ ${error.message || 'Free Key server से connection नहीं हो पाया।'}`, 'error');
+    } finally {
+        updateFreeKeyButtonUI();
     }
 }
 
@@ -2157,7 +2286,7 @@ async function redeemFreeKey(key) {
     const cleanKey = String(key || '').trim().toUpperCase();
     if (!cleanKey) throw new Error('कृपया Free Key डालें।');
 
-    setKeyStatus('12-hour Free Key verify हो रही है…', 'success');
+    setKeyStatus('1-hour Free Key verify हो रही है…', 'success');
 
     const deviceId = getFreeKeyDeviceId();
 
@@ -2189,6 +2318,8 @@ async function redeemFreeKey(key) {
             deviceId: deviceId
         });
 
+        scheduleFreeAccessExpiry();
+
         try {
             localStorage.setItem(FREE_KEY_DEVICE_STORAGE, deviceId);
         } catch (e) {}
@@ -2215,6 +2346,7 @@ async function checkFreeAccessFromServer() {
                 expiresAt: Number(data.expiresAt),
                 deviceId: deviceId
             });
+            scheduleFreeAccessExpiry();
             return true;
         }
 
@@ -2246,11 +2378,11 @@ async function verifyTestKey() {
         return;
     }
 
-    /* New 12-hour Free Key system. Existing paid key system remains below unchanged. */
+    /* New 1-hour Free Key system. Existing paid key system remains unchanged. */
     if (key.startsWith('HRRY-FREE-')) {
         try {
             const data = await redeemFreeKey(key);
-            setKeyStatus('✅ Free Key active हो गई। 12 घंटे तक Test Series unlock है।', 'success');
+            setKeyStatus('✅ Free Key active हो गई। 1 घंटे तक Test Series unlock है।', 'success');
 
             const unlockedTest = { ...pendingLockedTest };
             setTimeout(() => {
@@ -2406,6 +2538,8 @@ window.onload = async function() {
     initQuestionVoice();
     getDeviceId();
     await checkFreeAccessFromServer();
+    scheduleFreeAccessExpiry();
+    updateFreeKeyButtonUI();
 
     if (currentUser && currentUser.name) {
         showHomeScreen();
@@ -3561,10 +3695,16 @@ async function prepareTest(
 
     // Paid/permanent access stays exactly as before.
     // Free access is re-checked on the backend before opening a test.
-    if (!hasFullTestSeriesAccess() && hasActiveFreeAccess()) {
-        const serverFreeAccess = await ensureFreeAccessFromServer();
-        if (!serverFreeAccess) {
+    if (!hasFullTestSeriesAccess()) {
+        if (hasActiveFreeAccess()) {
+            const serverFreeAccess = await ensureFreeAccessFromServer();
+            if (!serverFreeAccess) {
+                clearFreeAccessLocal();
+                updateFreeKeyButtonUI();
+            }
+        } else {
             clearFreeAccessLocal();
+            updateFreeKeyButtonUI();
         }
     }
 
@@ -5461,19 +5601,23 @@ function viewHistoryDetail(
     <div class="key-or"><span>OR</span></div>
 
     <button type="button" class="key-whatsapp-btn" onclick="contactAdminWhatsApp()">
-      💬 Get Key from Admin ₹20
+      🔑 Get Key from Admin ₹20
     </button>
 
+    <div class="admin-key-link-note">
+      Opens secure Admin key page ↗
+    </div>
+
     <button type="button" class="free-key-btn" onclick="startFreeKeyFlow()">
-      🎁 Get Free Key • 12 Hours
+      🎁 Get Free Key • 1 Hour
     </button>
 
     <div class="free-key-note">
-      Free Key एक बार redeem होगी और इसी device पर 12 घंटे चलेगी।
+      Free Key एक बार redeem होगी और इसी device पर 1 घंटे चलेगी।
     </div>
 
     <div class="key-help-text">
-      Paid key के लिए Admin से संपर्क करें या 12-hour Free Key option इस्तेमाल करें।
+      Paid key के लिए Admin से key लें या 1-hour Free Key option इस्तेमाल करें।
     </div>
   </div>
 </div>
