@@ -1920,13 +1920,27 @@ const DEVICE_STORAGE_KEY = 'hrry_device_id';
 const UNLOCK_STORAGE_KEY = 'hrry_test_unlocks';
 let pendingLockedTest = null;
 
+let runtimeDeviceId = null;
+
 function getDeviceId() {
-    let id = localStorage.getItem(DEVICE_STORAGE_KEY);
-    if (!id) {
-        id = 'web_' + cryptoRandomId();
-        localStorage.setItem(DEVICE_STORAGE_KEY, id);
+    // Keep one stable ID for the whole page session. This is important when
+    // storage is temporarily unavailable (some WebViews/privacy modes).
+    if (runtimeDeviceId) return runtimeDeviceId;
+
+    try {
+        let id = localStorage.getItem(DEVICE_STORAGE_KEY);
+        if (!id) {
+            id = 'web_' + cryptoRandomId();
+            localStorage.setItem(DEVICE_STORAGE_KEY, id);
+        }
+        runtimeDeviceId = String(id);
+        return runtimeDeviceId;
+    } catch (e) {
+        // Fallback: even if localStorage is blocked, do NOT generate a new
+        // device ID on every API call.
+        runtimeDeviceId = 'web_' + cryptoRandomId();
+        return runtimeDeviceId;
     }
-    return id;
 }
 
 function cryptoRandomId() {
@@ -2069,79 +2083,147 @@ function contactAdminWhatsApp() {
 
 
 const FREE_KEY_BACKEND = 'https://hrry-test-backend.onrender.com';
+const FREE_KEY_DEVICE_STORAGE = 'hrry_free_key_device_v2';
+
+function getFreeKeyDeviceId() {
+    // Use the exact same device ID for /start and /redeem.
+    // This prevents a false "device not allowed" error if storage behaves
+    // differently between calls.
+    let id = getDeviceId();
+    try {
+        const saved = localStorage.getItem(FREE_KEY_DEVICE_STORAGE);
+        if (saved) id = saved;
+        else localStorage.setItem(FREE_KEY_DEVICE_STORAGE, id);
+    } catch (e) {}
+    return String(id);
+}
+
+async function fetchFreeKeyApi(path, options = {}) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20000);
+
+    try {
+        const response = await fetch(`${FREE_KEY_BACKEND}${path}`, {
+            ...options,
+            signal: controller.signal,
+            cache: 'no-store'
+        });
+
+        const data = await response.json().catch(() => ({}));
+        return { response, data };
+    } catch (error) {
+        if (error && error.name === 'AbortError') {
+            throw new Error('Free Key server ने समय पर जवाब नहीं दिया।');
+        }
+        throw new Error('Free Key server से connection नहीं हो पाया।');
+    } finally {
+        clearTimeout(timeout);
+    }
+}
 
 async function startFreeKeyFlow() {
     setKeyStatus('Free Key तैयार हो रही है…', 'success');
 
     try {
-        const response = await fetch(`${FREE_KEY_BACKEND}/api/free/start`, {
+        const deviceId = getFreeKeyDeviceId();
+
+        const { response, data } = await fetchFreeKeyApi('/api/free/start', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ deviceId: getDeviceId() })
+            body: JSON.stringify({ deviceId })
         });
 
-        const data = await response.json().catch(() => ({}));
-
         if (!response.ok || !data.ok || !data.shrinkmeUrl) {
-            throw new Error(data.error || 'Free Key link नहीं बन पाया।');
+            throw new Error(data.error || `Free Key server error (${response.status})`);
         }
+
+        // Remember which device started this key request.
+        try {
+            localStorage.setItem(FREE_KEY_DEVICE_STORAGE, deviceId);
+            if (data.requestId) {
+                localStorage.setItem('hrry_free_key_request_id', String(data.requestId));
+            }
+        } catch (e) {}
 
         setKeyStatus('✅ नया Free Key link तैयार है। इसे खोलकर key प्राप्त करें।', 'success');
         window.open(data.shrinkmeUrl, '_blank', 'noopener,noreferrer');
     } catch (error) {
         console.error('Free key start error:', error);
-        setKeyStatus('❌ Free Key server से connection नहीं हो पाया। थोड़ी देर बाद फिर कोशिश करें।', 'error');
+        setKeyStatus(`❌ ${error.message || 'Free Key server से connection नहीं हो पाया।'}`, 'error');
     }
 }
 
 async function redeemFreeKey(key) {
+    const cleanKey = String(key || '').trim().toUpperCase();
+    if (!cleanKey) throw new Error('कृपया Free Key डालें।');
+
     setKeyStatus('12-hour Free Key verify हो रही है…', 'success');
 
-    const response = await fetch(`${FREE_KEY_BACKEND}/api/free/redeem`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            key,
-            deviceId: getDeviceId()
-        })
-    });
+    const deviceId = getFreeKeyDeviceId();
 
-    const data = await response.json().catch(() => ({}));
+    try {
+        const { response, data } = await fetchFreeKeyApi('/api/free/redeem', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                key: cleanKey,
+                deviceId: deviceId
+            })
+        });
 
-    if (!response.ok || !data.ok) {
-        throw new Error(data.error || 'Free Key verify नहीं हुई।');
+        if (!response.ok || !data.ok) {
+            // Show the exact server reason instead of replacing it with a
+            // generic "verify failed" message.
+            throw new Error(data.error || `Free Key verify failed (${response.status})`);
+        }
+
+        const expiresAt = Number(data.expiresAt || 0);
+        if (!expiresAt || expiresAt <= Date.now()) {
+            throw new Error('Server ने expired Free Key response दिया।');
+        }
+
+        // Save the SAME device ID that was sent to the server.
+        saveFreeAccessLocal({
+            key: data.key || cleanKey,
+            expiresAt: expiresAt,
+            deviceId: deviceId
+        });
+
+        try {
+            localStorage.setItem(FREE_KEY_DEVICE_STORAGE, deviceId);
+        } catch (e) {}
+
+        return data;
+    } catch (error) {
+        console.error('Free key redeem error:', error);
+        throw error;
     }
-
-    saveFreeAccessLocal({
-        key: data.key || key,
-        expiresAt: Number(data.expiresAt),
-        deviceId: getDeviceId()
-    });
-
-    return data;
 }
 
 async function checkFreeAccessFromServer() {
     try {
-        const response = await fetch(`${FREE_KEY_BACKEND}/api/free/status`, {
+        const deviceId = getFreeKeyDeviceId();
+        const { response, data } = await fetchFreeKeyApi('/api/free/status', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ deviceId: getDeviceId() }),
-            cache: 'no-store'
+            body: JSON.stringify({ deviceId })
         });
-
-        const data = await response.json().catch(() => ({}));
 
         if (response.ok && data.ok && data.active) {
             saveFreeAccessLocal({
                 key: data.key,
                 expiresAt: Number(data.expiresAt),
-                deviceId: getDeviceId()
+                deviceId: deviceId
             });
             return true;
         }
 
-        clearFreeAccessLocal();
+        // Do not erase a still-valid local access just because a temporary
+        // status request failed. Only clear it when the server explicitly
+        // says that access is inactive/expired.
+        if (response.ok && data.ok === false && data.active === false) {
+            clearFreeAccessLocal();
+        }
         return false;
     } catch (error) {
         console.warn('Free access server check failed:', error);
